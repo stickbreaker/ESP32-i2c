@@ -33,9 +33,10 @@ typedef struct {
 	uint8_t* fields;     // sub field desc, neg means reserved
 	}	STATUS_vt;
 
+#define MAX_VT 32
 typedef struct {
 	uint16_t count;
-	STATUS_vt vt[10];
+	STATUS_vt vt[MAX_VT];
 } STATUS_CONTROL_t;
 	
 STATUS_CONTROL_t sc;	
@@ -46,13 +47,6 @@ STATUS_CONTROL_t sc;
 #define DISP_HEX	(BIT(6))
 #define	DISP_BOOL	(BIT(5))
 	
-/* forwards unused!
-
-uint16_t I2C_STATUS_REG_disp(STATUS_vt *vt,uint16_t inlen,bool force,bool title);
-uint16_t I2C_CTR_disp(STATUS_vt *vt,uint16_t inlen, bool force, bool title);
-uint16_t I2C_SCL_LOW_PERIOD_disp(STATUS_vt *vt,uint16_t inlen, bool force, bool title);
-*/
-
 const char STATUS_FIELDS[]={ // negative markes reserved, 'H' says disp in HEX
 	"-18,14\0"				// 'B' says Y or N
 	"-23,1,1,1,1,1,-1,1,1,1\0"
@@ -80,25 +74,25 @@ const char STATUS_FIELDS[]={ // negative markes reserved, 'H' says disp in HEX
 	"\0"};
 
 	const char STATUS_NAMES[]={
-		"scl_low_period\0"
+		"scl_low_period\0" 
 		"ctr\0"
 		"status_reg\0"
 		"timeout\0"
 		"slave_addr\0"
 		"fifo_st\0"
-		"fifo_conf\0"
-		"fifo_data\0"
+		"fifo_conf\0"	
+		"fifo_data\0"	
 		"int_raw\0"
 		"int_clr\0"
-		"int_ena\0"
+		"int_ena\0" 
 		"int_status\0"
-		"sda_hold\0"
-		"sda_sample\0"
+		"sda_hold\0"	
+		"sda_sample\0"	
 		"scl_high_period\0"
 		"reserved_3c\0"
-		"scl_start_hold\0"
+		"scl_start_hold\0"	
 		"scl_rstart_setup\0"
-		"scl_stop_hold\0"
+		"scl_stop_hold\0"	
 		"scl_stop_setup\0"
 		"scl_filter_cfg\0"
 		"sda_filter_cfg\0"
