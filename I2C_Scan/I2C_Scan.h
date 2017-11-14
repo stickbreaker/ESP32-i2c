@@ -47,7 +47,7 @@ STATUS_CONTROL_t sc;
 #define DISP_HEX	(BIT(6))
 #define	DISP_BOOL	(BIT(5))
 	
-const char STATUS_FIELDS[]={ // negative markes reserved, 'H' says disp in HEX
+const char STATUS_FIELDS[]={ // negative marks reserved, 'H' says disp in HEX
 	"-18,14\0"				// 'B' says Y or N
 	"-23,1,1,1,1,1,-1,1,1,1\0"
 	"-1,3,-1,3,6H,-4,6H,-1,1,1,1,1,1,1,1\0"

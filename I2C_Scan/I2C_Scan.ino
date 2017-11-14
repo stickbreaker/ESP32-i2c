@@ -462,6 +462,21 @@ if(b){// exists in list
 		line++;
 		}while(!success);
 	}
+else if(strcmp(nextParam,"*")==0){
+  // rethink this so that is displays on one line?
+  uint16_t line=0,len;
+	bool success;
+  do{
+    b=0;
+		success=true;
+    len = 0;
+    while(b<sc.count){
+      len=dispField(&sc.vt[b],len,true,title,&success,line);
+      b++;
+      }
+		line++;
+		}while(!success);
+  }
 }
 
 void status_display_list(bool title){
@@ -787,7 +802,7 @@ recover
 cmd 'recover'
 */
 
-void recover(){
+void recover(){ // did not work
 dev->ctr.trans_start=0;
 uint8_t i = 0;
 /*while(i<16){
@@ -853,6 +868,27 @@ else {
 	}
 }
 
+void tran(){// 11/13/17 test for transaction (sendStop=false);
+Wire.beginTransmission(ID);
+Wire.write(highByte(addr));
+Wire.write(lowByte(addr));
+//Wire.newEndTransmission(); // worked Interrupt driven Transmit 
+
+uint8_t err =Wire.transact(BlockLen);
+if(err!=BlockLen){
+  Serial.printf("trans=%d\n",err);
+  Serial.printf("last Error =%d",Wire.lastError());
+  }
+uint8_t *buf=(uint8_t*)calloc(BlockLen,sizeof(uint8_t));
+uint16_t index=0;
+while(Wire.available()){
+  buf[index]=Wire.read();
+  if(index<BlockLen) index++;
+  }
+dispBuff(buf,BlockLen,addr);
+free(buf);
+}
+
 void unknownCmdParam(const char* cmd,char* nextParam){
 	Serial.printf("%s: unknown Parameter= %s\n",cmd,nextParam);
 }
@@ -873,7 +909,10 @@ else{
 	}
 
 while(line){ // have next command line, parse it
-  if(strcmp(nextParam,"big")==0){ // run bigBlock with current addr,ID,BlockLen
+  if(strcmp(nextParam,"tran")==0){ // test for transaction queued data
+    tran();
+    }
+  else if(strcmp(nextParam,"big")==0){ // run bigBlock with current addr,ID,BlockLen
 		nextParam = strtok_r(NULL," ,",&saveptr1);
 		if(nextParam){
 			if(strcmp(nextParam,"?")==0) displayBigHelp();
