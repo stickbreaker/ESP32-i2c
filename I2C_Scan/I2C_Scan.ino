@@ -686,12 +686,12 @@ Wire.write(highByte(addr));
 Wire.write(lowByte(addr));
 uint16_t err=Wire.endTransmission();
 if(err){
-	Serial.printf(" setting address failed =%d",err);
+	Serial.printf("device(0x%02x) setting address failed =%d",ID,err);
 	nextCommand=NO_COMMAND;
 	return;
 	}
 uint8_t* bigBlock=(uint8_t*)calloc(BlockLen,sizeof(uint8_t));
-uint16_t cnt=Wire.newRequestFrom(ID,bigBlock,BlockLen,true);
+uint16_t cnt=Wire.polledRequestFrom(ID,bigBlock,BlockLen,true);
 Serial.printf(" completed at: %ld, %ld cnt=%d\n",millis(),millis()-start,cnt);
 if(cnt!=BlockLen){
 	Serial.printf("ERROR newRequestFrom \n");
@@ -873,17 +873,29 @@ Wire.beginTransmission(ID);
 Wire.write(highByte(addr));
 Wire.write(lowByte(addr));
 //Wire.newEndTransmission(); // worked Interrupt driven Transmit 
-
-uint8_t err =Wire.transact(BlockLen);
-if(err!=BlockLen){
-  Serial.printf("trans=%d\n",err);
-  Serial.printf("last Error =%d",Wire.lastError());
-  }
 uint8_t *buf=(uint8_t*)calloc(BlockLen,sizeof(uint8_t));
 uint16_t index=0;
-while(Wire.available()){
-  buf[index]=Wire.read();
-  if(index<BlockLen) index++;
+
+if(BlockLen <= 128) { // use internal Wire.h buffer
+  Serial.print("using Wire()'s Buffer\n");
+  uint8_t err =Wire.transact(BlockLen);
+  if(err!=BlockLen){
+    Serial.printf("trans=%d\n",err);
+    Serial.printf("last Error =%d\n",Wire.lastError());
+    }
+  while(Wire.available()){
+    if(index<BlockLen)
+      buf[index]=Wire.read();
+    index++;
+    }
+  }
+else { // use local buffer, no Wire.read()
+  Serial.print("using local Buffer\n");
+  uint16_t err = Wire.transact(buf,BlockLen);
+  if(err != BlockLen){
+    Serial.printf("trans=%d\n",err);
+    Serial.printf("last Error =%d\n",Wire.lastError());
+    }
   }
 dispBuff(buf,BlockLen,addr);
 free(buf);
@@ -909,7 +921,13 @@ else{
 	}
 
 while(line){ // have next command line, parse it
-  if(strcmp(nextParam,"tran")==0){ // test for transaction queued data
+  if(strcmp(nextParam,"ints")==0){ // Dump Interrupt Capture Buffer
+    Wire.dumpInts();
+    }
+  else if(strcmp(nextParam,"dev")==0){// Try I2C Device Id
+    i2cDeviceId();
+    }
+  else if(strcmp(nextParam,"tran")==0){ // test for transaction queued data
     tran();
     }
   else if(strcmp(nextParam,"big")==0){ // run bigBlock with current addr,ID,BlockLen
@@ -946,6 +964,9 @@ while(line){ // have next command line, parse it
 			ll=atol(nextParam);
 			setSpeed(ll);
 			}
+    else {// display current Speed
+      Serial.printf("Current i2c Bus Speed = %d\n",Wire.getClock());
+      }
 		}
 	else if(strcmp(nextParam,"slave")==0){// "slave, id(7bit hex)=0x83"
 		// configure for 7bit slave access
@@ -958,7 +979,7 @@ while(line){ // have next command line, parse it
 	else if(strcmp(nextParam,"off")==0){ // shutdown repetive commands 
 		nextParam = proc_off(&saveptr1);
 		}
-	else if(strcmp(nextParam,"nr")==0){ // new read "nr id(hex)=0x50 len(dec)=10 repeat(dec seconds)=5"
+	else if(strcmp(nextParam,"nr")==0){ // polled block read "nr id(hex)=0x50 len(dec)=10 repeat(dec seconds)=5"
 		nextParam = proc_newRead(&saveptr1);
 		}
 	else if(strcmp(nextParam,"scan")==0){ // run I2C device NAK scan
@@ -1002,7 +1023,10 @@ while(line){ // have next command line, parse it
 		nextParam = strtok_r(NULL," ,",&saveptr1);
 		if(nextParam) {
 			if(strcmp(nextParam,"?")!=0){
-				ID=atoi(nextParam);
+        if(strstr(nextParam,"0x")==nextParam){// hex
+          ID=strtol(&nextParam[2],NULL,16);
+          }
+        else ID=atoi(nextParam);
 				}
 			}
 		dispVars();
@@ -1011,7 +1035,10 @@ while(line){ // have next command line, parse it
 		nextParam = strtok_r(NULL," ,",&saveptr1);
 		if(nextParam){
 			if(strcmp(nextParam,"?")!=0){
-				addr=xtoi(nextParam);
+        if(strstr(nextParam,"0x")==nextParam){// hex
+          addr=strtol(&nextParam[2],NULL,16);
+          }
+        else addr=atoi(nextParam);
 				}
 			}
 		dispVars();
@@ -1069,17 +1096,27 @@ if((millis()-timeOut)>RepeatPeriod){
 		currentCommand = NO_COMMAND;
 		}
 	timeOut = millis(); // reset for next
-	Serial.print("before call");
+//	Serial.print("before call");
 	Wire.beginTransmission(ID);
-	Wire.write(highByte(addr));
+  if((ID >= 0x50)&&(ID <= 0x57)) Wire.write(highByte(addr));
 	Wire.write(lowByte(addr));
 	if((err=Wire.endTransmission())!=0)	{
-		Serial.printf("EndTransmission=%d, resetting\n",err);
-		Wire.reset();
+		Serial.printf(" EndTransmission=%d",err);
+    if(err!=2) {
+      Serial.printf(", resetting\n");
+      Wire.reset();
+      return;
+      }
+    else {
+      Serial.printf(", No Device presend, aborting\n");
+      currentCommand= NO_COMMAND;
+      return;
+      }
 		}
-	err = Wire.newRequestFrom(ID,BlockLen,true);
+	err = Wire.requestFrom(static_cast<uint8_t>(ID),static_cast<size_t>(BlockLen),static_cast<bool>(true));
 	Serial.printf("@0x%02x(0x%04x)=%d ->",ID,addr,err);
 	addr += BlockLen;
+  if(!((ID >= 0x50)&&(ID <= 0x57))) addr %= 256; // byte addressed devices
 	uint8_t b=0;
 	char buf[100];
 	uint16_t blen=0;
@@ -1493,6 +1530,32 @@ while(adr<0x58){
 	}
 }
 
+void i2cDeviceId(){ //per Philips UN10204
+uint8_t a=8;
+Wire.beginTransmission(0x7c); // device Id request
+if(Wire.endTransmission()==0){ // Some Device on the buss has Id Capabilities
+  while (a<0x78){
+    Wire.beginTransmission(0x7C);
+    Wire.write((uint8_t)a<1);
+    uint8_t err=Wire.transact(3);
+    if(err!=3){
+      if(!((err==0)&&(Wire.lastError()==3)))
+        Serial.printf("\nDevice ID(0x%02x)= ERROR transact=%d, lastError=%d",a,err,Wire.lastError());
+      }
+    if(Wire.available()){
+      Serial.printf("\nDevice ID(0x%02x)= ",a);
+      while(Wire.available()){
+        Serial.printf("0x%02x ",Wire.read());
+        }
+      }
+    a++;
+    }
+  Serial.println();
+  }
+else {
+  Serial.println("\nNo Devices Answered Device_ID Request.\n");
+  }
+}
 void dispVars(){
 Serial.printf("\n	ID=0x%02x, BlockLen=%d, Addr=0x%04x, Delay=%d %s\n",ID,BlockLen,addr,((RepeatPeriod%1000)==0)?(RepeatPeriod /1000):RepeatPeriod,((RepeatPeriod%1000)==0)?"sec":"ms");
 }
@@ -1522,18 +1585,24 @@ Serial.println("	cmd				: Display I2C command list in a formatted array");
 void displayHelp(){
 Serial.println();
 Serial.println("Commands:");
-Serial.println("  ?,help	: Help, this Screen");
-Serial.println("  off		: Shutdown continuous display");
-Serial.println("  scan		: Run I2C Device Scan");
-Serial.println("  size		: Run I2C eeprom size Probe 0x50:0x57, 16bit addressing");
-Serial.println("  nr 		: newRequestFrom() with Internal Wire Buffers");
-Serial.println("  stat		: control of background process to display I2C register values");
-Serial.println("  big		: newRequestFrom() using provided buffer, disp content");
-Serial.println("  explode	: execute 'big' continuously while BlockLen++ and addr--, minimal display");
-Serial.println("  block		: set BlockLen(dec)\n"
-"  id		: set I2C device address(hex)\n"
-"  repeat	: set repeat(dec) 1..49(sec) 50>(milliseconds)\n"
-"  addr	: set address pointer for read");
+Serial.println("  ?,help  : Help, this Screen");
+Serial.println("  off     : Shutdown continuous display");
+Serial.println("  scan    : Run I2C Device Scan");
+Serial.println("  size    : Run I2C eeprom size Probe 0x50:0x57, 16bit addressing");
+Serial.println("  nr      : (polled) newRequestFrom() with Internal Wire Buffers");
+Serial.println("  stat    : control of background process to display I2C register values, help 'stat ?'");
+Serial.println("  big     : (polled) newRequestFrom() using provided buffer, disp content");
+Serial.println("  explode : (polled) execute 'big' continuously while BlockLen++ and addr--, minimal display");
+Serial.println("  dev     : (intr) Request Manufactures Device ID for all Devices on I2C bus");
+Serial.println("  tran    : (intr) issue beginTransmision(id),write(addr),transact(BlockLen)");
+Serial.println("  ints    : (intr) Display Interrupt Capture Buffer from esp32-hal-i2c.c");
+Serial.println("  speed   : Set i2c bus speed in Hz, default=100000");
+Serial.println("  cmd     : display current I2C Command[] buffer"); 
+Serial.println("  pins    : DigitalRead of SCL and SDA");
+Serial.println("  block   : set BlockLen(dec)\n"
+  "  id      : set I2C device address(hex)\n"
+  "  repeat  : set repeat(dec) 1..49(sec) 50>(milliseconds)\n"
+  "  addr    : set address pointer for read");
 Serial.println("\nCurrent values:");
 Serial.printf("COMMAND: prior =%s, next=%s, current=%s STAT=%s\n",
 	command_name(priorCommand),command_name(nextCommand),command_name(currentCommand),
