@@ -34,6 +34,8 @@ bool TenBit = false; // 7bit mode
 uint16_t addr=0;
 uint8_t* compBuff=NULL;
 uint16_t compLen=0;
+bool sendStop=true;
+bool ackBit=true;
 
 #define BUFLEN 100
 char keybuf[BUFLEN+1];
@@ -134,11 +136,12 @@ return out;
 
 char * proc_slave(uint8_t bits,char** savePtr){
 char * param = strtok_r(NULL," ,",savePtr);
-uint16_t i=xtoi(param);
-if(i!=0){
-	setSlave(i,(bits==10));
-	nextCommand = COMMAND_SLAVE_MODE;
-	}
+uint16_t i=xtoi(param); // read slave addrs if present
+if(param)	setSlave(i,(bits==10));
+else setSlave(ID,(bits==10));
+
+nextCommand = COMMAND_SLAVE_MODE;
+
 return NULL;
 }
 
@@ -231,6 +234,10 @@ Serial.println("  stat [on|off|init|title|names|?|shrink]\n"
 }
 
 uint16_t status_find_name(char *nextParam){ // returns 1..n or 0 for not found
+if(nextParam){
+  if(strlen(nextParam)==0) return 0;
+  }
+else return 0;
 
 char* catalog=(char*)&STATUS_NAMES;
 bool found=false;
@@ -304,6 +311,101 @@ if(found)
 	return b+1;
 else
 	return 0;
+}
+void sendit(uint8_t it){
+  // assumes SCL is low on entry and Low on output
+for(uint8_t a =0;a<8;a++){
+  if(it&0x80) digitalWrite(19,HIGH);
+  else digitalWrite(19,LOW);
+  delayMicroseconds(10);
+  digitalWrite(23,HIGH);
+  delayMicroseconds(10);
+  digitalWrite(23,LOW);
+  it= it <<1;
+  }
+digitalWrite(19,HIGH); // release SDA
+}
+
+bool testAck(bool ack,uint16_t bytenum){
+ // expects scl_drive Low, sda_drive high
+delayMicroseconds(5);
+digitalWrite(23,HIGH);
+bool good = true;
+if(digitalRead(21)&&ack) {
+  Serial.printf(" byte(%d) Expected Ack bit ",bytenum);
+  pins("");
+  Serial.print(" NAK\n");
+  good =false;
+  }
+else if(!ack && !digitalRead(21)){
+  Serial.printf(" byte(%d) Unexpect Ack bit ",bytenum);
+  pins("");
+  Serial.print(" ack\n");
+  good=false;
+  }
+delayMicroseconds(5);
+digitalWrite(23,LOW);
+return good;
+}
+void emptyRxFifo(){
+Serial.printf("data[%02d]=",dev->status_reg.rx_fifo_cnt);
+while(dev->status_reg.rx_fifo_cnt){
+  uint32_t a = dev->fifo_data.val;
+  Serial.printf(" 0x%02x",a);
+  }
+Serial.println();
+dev->int_clr.rx_fifo_full = 1;
+}
+
+void toggle( bool ack, bool sendStop, char* buff){
+// toggle wired 19->21, 23->22
+// diode cathode (bar'd) at 19,23
+dev->int_clr.val =0x1FFFF;
+I2Cstat();//
+Serial.printf("Toggle ack=%s STOP=%s",(ack)?"YES":"NO",(sendStop)?"YES":"NO");
+if(buff){
+  uint16_t a=0;
+  if(buff[a]){
+    Serial.printf(" data[%d]=",strlen(buff));
+    while(buff[a]){
+      Serial.printf(" 0x%02x",buff[a++]);
+      }
+    }
+  }
+Serial.println();
+if(!(digitalRead(21) && digitalRead(22))){
+  pins("\n");
+  }
+digitalWrite(19,HIGH);
+digitalWrite(23,HIGH);
+pinMode(19,OUTPUT); //assume SDA
+pinMode(23,OUTPUT); //assume SCL
+digitalWrite(23,HIGH); // scl High
+digitalWrite(19,LOW); // drop SDA for a start
+delayMicroseconds(5);
+digitalWrite(23,LOW);
+sendit((ID)<<1); // should be write of 0x51
+// ack Pulse
+testAck(ack,0);
+uint16_t i=0;
+while(i<strlen(buff)){
+  sendit(buff[i++]);
+  testAck(ack,i);
+  }
+
+if(sendStop){
+  digitalWrite(19,LOW); //setup for stop bit
+  }
+delayMicroseconds(5);
+digitalWrite(23,HIGH); // release SCL bit
+delayMicroseconds(2);
+if(sendStop){
+  digitalWrite(19,HIGH); // Stop bit done
+  }
+if(!sendStop){
+  Serial.println("Waiting for ReStart");
+  }
+Serial.println();
 }
 
 void status_update(char *nextParam, uint16_t directed){ // nextParam points to the next single word with suffixs
@@ -449,7 +551,7 @@ if(b){
 	}
 }
 	
-void status_display_word(char *nextParam,bool title){
+void status_display_word(char *nextParam,bool title, uint16_t * lenin){
 //Serial.printf("display word %s\n",nextParam);
 uint16_t b = status_find_inList(nextParam);
 if(b){// exists in list
@@ -457,10 +559,11 @@ if(b){// exists in list
 	bool success;
   do{
 		success=true;
-		len = 0;
-		dispField(&sc.vt[b-1],len,true,title,&success,line);
+		len = *lenin;
+		len=dispField(&sc.vt[b-1],len,true,title,&success,line);
 		line++;
 		}while(!success);
+  *lenin = len;
 	}
 else if(strcmp(nextParam,"*")==0){
   // rethink this so that is displays on one line?
@@ -548,46 +651,102 @@ if(b){
 	}
 }
 
+bool nextWildCard(char *nextParam, uint16_t *wildOne, char *wildName){
+// will support trailing wildcards only, no mixed or leading.
+// +scl* -scl* scl*:raw sda*
+uint16_t wildPos=strcspn(nextParam,"*");
+bool wildCard=(wildPos != strlen(nextParam));
+bool found =false;
+if(wildCard){ // start looking
+  uint16_t startPos = strcspn(nextParam,"-+><?");
+  if(startPos==strlen(nextParam)) startPos=0; // not found so start at first char
+  else startPos=1; // skip over modifier
+  uint16_t len =wildPos;
+  if(len>startPos) len = len -startPos;
+  else len=0;
+  if(len>0) memmove(wildName,&nextParam[startPos],len);
+  wildName[len]='\0';
+  // now should have leading characters of name.
+  // now search through catalog for matching, using *wildOne as starting
+  char* catalog=(char*)&STATUS_NAMES;
+  uint16_t cnt=0;
+  while((cnt < *wildOne)&&(catalog[0])){ // index to next possible match
+    catalog = catalog + strlen(catalog)+1;
+    cnt++;
+    }
+ 
+  while((!found)&&(catalog[0])){
+    found = strncmp(catalog,wildName,strlen(wildName))==0;
+    if(!found){
+      catalog = catalog + strlen(catalog)+1;
+      cnt++;
+      }
+    }
+  if(found){
+    *wildOne = cnt+1;
+    memmove(wildName,nextParam,startPos);
+    memmove(&wildName[startPos],catalog,strlen(catalog)+1); //include null 
+    if((len+startPos+1) < strlen(nextParam)){ // add suffix
+      memmove(&wildName[strlen(wildName)],&nextParam[len+startPos+1],(strlen(nextParam)-(len+startPos+1))+1);// include Null
+      }
+    }
+  }    
+else {// no wild card just copy from nextParam to wildName
+  found = false;
+  *wildOne = 0;
+  uint16_t len=strlen(nextParam);
+  if(len>31) len=31; // wildName is a 32 char buffer
+  memmove(wildName,nextParam,len);
+  wildName[len]='\0';
+  }
+return found;
+}
+
 void status_process_list(char *nextParam, char** savePtr){
 bool titleChanged=false;
+uint16_t dispLen = 0;
 while(nextParam){
-//Serial.printf("status Process List=%s\n",nextParam);
-	if(nextParam[0]=='+'){ // add next status word to list
-		status_add(nextParam);
-		titleChanged = true;
-		}
-	else if(nextParam[0]=='-'){ // remove next status word from list
-	  status_remove(nextParam);
-		titleChanged = true;
-		}
-	else if(nextParam[0]=='?'){// display mask value
-		status_mask_disp(nextParam,0);
-		}
-	else if(nextParam[0]=='>'){// shift this word right
-	  status_shift_right(nextParam);
-		titleChanged = true;
-		}
-	else if(nextParam[0]=='<'){// shift this word left
-	  status_shift_left(nextParam);
-		titleChanged = true;
-		}
-	else if(strcmp(nextParam,"shrink")==0){ // recover deleted columns
-		for(uint8_t a=0; a<MAX_VT; a++){
-			sc.vt[a].position=0;
-			}
-		titleChanged = true;
-		}
-	else if(strcmp(nextParam,"init")==0){ // Stop display, delete all positions
-		status_init();
-		}
-	else { // display info for this word
-		char* testParam=strchr(nextParam,':');
-		if(testParam) status_update(nextParam,0);
-		else status_display_word(nextParam,false);
-		}	
-	
-	nextParam=strtok_r(NULL," ,",savePtr);
-	}
+  uint16_t wildOne = 0;
+  char wildName[32];
+  bool wildCard = nextWildCard(nextParam,&wildOne,(char*)&wildName); 
+  do{
+  //Serial.printf("status Process List=%s\n",nextParam);
+    if(wildName[0]=='+'){ // add next status word to list
+      status_add(wildName);
+      titleChanged = true;
+      }
+    else if(wildName[0]=='-'){ // remove next status word from list
+      status_remove(wildName);
+      titleChanged = true;
+      }
+    else if(wildName[0]=='?'){// display mask value
+      status_mask_disp(wildName,0);
+      }
+    else if(wildName[0]=='>'){// shift this word right
+      status_shift_right(wildName);
+      titleChanged = true;
+      }
+    else if(wildName[0]=='<'){// shift this word left
+      status_shift_left(wildName);
+      titleChanged = true;
+      }
+    else if(strcmp(wildName,"shrink")==0){ // recover deleted columns
+      for(uint8_t a=0; a<MAX_VT; a++){
+        sc.vt[a].position=0;
+        }
+      titleChanged = true;
+      }
+    else if(strcmp(wildName,"init")==0){ // Stop display, delete all positions
+      status_init();
+      }
+    else { // display info for this word
+      char* testParam=strchr(wildName,':');
+      if(testParam) status_update(wildName,0);
+      else status_display_word(wildName,false,&dispLen);
+      }	
+    }while(wildCard=nextWildCard(nextParam,&wildOne,(char*)&wildName));
+  nextParam=strtok_r(NULL," ,",savePtr);
+  }
 if(titleChanged) status_display_list(true);
 }
 
@@ -607,7 +766,8 @@ uint16_t adr=0;
 asciibuf[0] ='\0';
 while(adr<len){
 	if(((offset+adr)&0x1F)==0){
-		Serial.printf(" %s\n0x%04x:",asciibuf,offset+adr);
+    if(asciibuf[0]) Serial.printf(" %s\n",asciibuf);
+		Serial.printf("0x%04x:",(uint16_t)(offset+adr));
 		bufPos=0;
 		}
 	Serial.printf(" %02x",buf[adr]);
@@ -682,7 +842,7 @@ void bigBlock(bool display){
 uint32_t start=0;
 Serial.printf("starting at: %ld ",start=millis());
 Wire.beginTransmission(ID);
-Wire.write(highByte(addr));
+if((ID>=0x50)&&(ID<=0x50)) Wire.write(highByte(addr));
 Wire.write(lowByte(addr));
 uint16_t err=Wire.endTransmission();
 if(err){
@@ -868,16 +1028,16 @@ else {
 	}
 }
 
-void tran(){// 11/13/17 test for transaction (sendStop=false);
+void tran( bool title){// 11/13/17 test for transaction (sendStop=false);
 Wire.beginTransmission(ID);
-Wire.write(highByte(addr));
+if((ID>=0x50)&&(ID<=0x57))Wire.write(highByte(addr)); // 16bit address
 Wire.write(lowByte(addr));
 //Wire.newEndTransmission(); // worked Interrupt driven Transmit 
-uint8_t *buf=(uint8_t*)calloc(BlockLen,sizeof(uint8_t));
 uint16_t index=0;
+uint8_t *buf=(uint8_t*)calloc(BlockLen,sizeof(uint8_t));
 
 if(BlockLen <= 128) { // use internal Wire.h buffer
-  Serial.print("using Wire()'s Buffer\n");
+  if(title)Serial.print("Transact using Wire()'s Buffer\n");
   uint8_t err =Wire.transact(BlockLen);
   if(err!=BlockLen){
     Serial.printf("trans=%d\n",err);
@@ -890,7 +1050,7 @@ if(BlockLen <= 128) { // use internal Wire.h buffer
     }
   }
 else { // use local buffer, no Wire.read()
-  Serial.print("using local Buffer\n");
+  if(title) Serial.print("Transact using local Buffer\n");
   uint16_t err = Wire.transact(buf,BlockLen);
   if(err != BlockLen){
     Serial.printf("trans=%d\n",err);
@@ -905,12 +1065,108 @@ void unknownCmdParam(const char* cmd,char* nextParam){
 	Serial.printf("%s: unknown Parameter= %s\n",cmd,nextParam);
 }
 
+void pins(const char* term){
+Serial.printf("scl=%d, sda=%d%s",digitalRead(22),digitalRead(21),term);
+}
+
+bool parseAsQuotedEscapedString(char ** nextParam,char **savePtr,char *buff,uint16_t maxBuff){
+  // parse the string nextParam for a quoted string "string\x3f\x3f\x0a\x0d"
+  // -> string\\<cr><lf>
+//Serial.printf("*nextParam(%p)=%p, [0]=%c\n",nextParam,*nextParam,*nextParam[0]);
+uint16_t foundAt = strcspn(*nextParam,"\"");
+//Serial.printf("afterFound =%d\n",foundAt);
+if((foundAt==0)&&(strlen(*nextParam)>0)){
+  char *local=*nextParam; // without this the compiler is confused of &(*nextParam[offset])
+  uint16_t endsAt = strcspn(&(local[foundAt+1]),"\"");
+  uint16_t len = (endsAt>(maxBuff-1))?maxBuff-1:endsAt;
+  memmove(buff,&(local[foundAt+1]),len); // grab quoted string,
+  *nextParam=strtok_r(&(local[endsAt+foundAt+1])," ,",savePtr); //skip quoted
+  if(*nextParam){
+    if(*nextParam[0] == '"') (*nextParam)++; 
+    if(strlen(*nextParam)==0) *nextParam=NULL; // ack like strtok_r found the end.
+//    Serial.printf("*nextParam(%p)=%c\n",*nextParam,*nextParam[0]);
+    }
+  else {
+//    Serial.printf("end of line\n");
+    }
+  buff[len]='\0';
+  uint16_t outpos=0,inpos=0;  
+  char c,c1;
+  bool copy;
+  while(inpos<len){
+    copy = true;
+    if(buff[inpos]=='\\') {
+      if((inpos+1)<len){
+        inpos++;
+        if(buff[inpos]=='x'){
+          if((inpos+1)<len){//first char
+            inpos++;
+            c=buff[inpos];
+            if((c>='0')&&(c<='9')) c = c -48;
+            else if((c>='A')&&(c<='F')) c = c -55;
+            else if((c>='a')&&(c<='f')) c = c - 87;
+            else {
+              memmove(&buff[outpos],&buff[inpos-2],3);
+              inpos++;
+              outpos += 3; // was not valid escape
+              continue;
+              }
+            if((inpos+1)<len){ // second char
+              inpos++;
+              c1=buff[inpos];
+              if((c1>='0')&&(c1<='9')) c1 = c1 -48;
+              else if((c1>='A')&&(c1<='F')) c1 = c1 -55;
+              else if((c1>='a')&&(c1<='f')) c1 = c1 - 87;
+              else {
+                memmove(&buff[outpos],&buff[inpos-3],4);
+                inpos++;
+                outpos += 4; // no valid escape
+                continue;
+                }
+              buff[outpos]=(c<<4)+c1;
+              copy=false;
+              }
+            else {
+              memmove(&buff[outpos],&buff[inpos-2],3);
+              inpos++;
+              outpos += 3;
+              continue;
+              }
+            }
+          else {
+            memmove(&buff[outpos],&buff[inpos-1],2);
+            inpos++;
+            outpos += 2;
+            continue;
+            }
+          }
+        else {
+          memmove(&buff[outpos],&buff[inpos-1],1);
+          outpos += 1;
+          continue;
+          }
+        }
+      }
+    if(copy) buff[outpos]=buff[inpos];
+    inpos++;
+    outpos++;
+    }
+  buff[outpos]='\0';   
+  return true; // moved quoted string into buff, updated nextParam
+  }
+else {
+  if(maxBuff>0) buff[0]=='\0';
+  return false; // buff is empty nextParam still contains the current value
+  }
+}  
+
 void processCommand(){
 
 char *nextParam,*saveptr,*line,*saveptr1;
 
 uint16_t l=0;
 uint32_t ll=0;
+char buff[100];
 line = strtok_r(keybuf,"\n",&saveptr);//break input into lines, to process one at a time.
 if(line==NULL){
 	if(currentCommand==NO_COMMAND) nextCommand=priorCommand;
@@ -921,14 +1177,73 @@ else{
 	}
 
 while(line){ // have next command line, parse it
-  if(strcmp(nextParam,"ints")==0){ // Dump Interrupt Capture Buffer
+  if (strcmp(nextParam,"test")==0){
+    nextParam = strtok_r(NULL,"",&saveptr1); // grab rest of line
+    if(nextParam){
+      Serial.printf("test =%s|",nextParam);
+      Serial.printf(" %s is a quoted string=%s, parsedAs=%s|",nextParam,(parseAsQuotedEscapedString(&nextParam,&saveptr1,buff,100))?"YES":"NO",buff);
+      }
+    }
+  else if(strcmp(nextParam,"fifo")==0){
+    emptyRxFifo();
+    }
+  else if(strcmp(nextParam,"clr")==0){// clear pending interrupts
+		nextParam = strtok_r(NULL," ,",&saveptr1);
+		if(nextParam) {
+			if(strcmp(nextParam,"?")!=0){
+        if(strstr(nextParam,"0x")==nextParam){// hex
+          ID=strtol(&nextParam[2],NULL,16);
+          }
+        else ID=atoi(nextParam);
+				}
+			}
+    else status_process_list("int_raw",&saveptr1); // 
+    }
+  else if(strcmp(nextParam,"toggle")==0){
+    uint8_t cnt=0;
+    buff[0] ='\0';
+    char testbuff[100];
+    nextParam = strtok_r(NULL,"",&saveptr1);//grab rest of line
+    while(nextParam){
+      bool val=false;
+      if(parseAsQuotedEscapedString(&nextParam,&saveptr1,testbuff,100)){ // already in buff
+        strcpy(buff,testbuff);
+        }
+      else nextParam = strtok_r(nextParam," ,",&saveptr1);
+      if(nextParam){
+        if(strcmp(nextParam,"1")==0) val=true;
+        if(strcmp(nextParam,"yes")==0) val=true;
+        if(strcmp(nextParam,"t")==0) val = true;
+        if((cnt%2)==0) {
+          ackBit=val;
+          }
+        if((cnt%2)==1){
+          sendStop=val;
+          }
+          
+        cnt++;
+        nextParam = strtok_r(NULL,"",&saveptr1); // whole string 
+        }
+      }
+    toggle(ackBit,sendStop,buff);
+    }
+  else if(strcmp(nextParam,"ints")==0){ // Dump Interrupt Capture Buffer
     Wire.dumpInts();
     }
   else if(strcmp(nextParam,"dev")==0){// Try I2C Device Id
     i2cDeviceId();
     }
   else if(strcmp(nextParam,"tran")==0){ // test for transaction queued data
-    tran();
+		nextParam = strtok_r(NULL," ,",&saveptr1);
+    if(nextParam){
+      uint16_t a = atoi(nextParam);
+      tran(true);
+      while(a>0){
+        tran(false);
+        a--;
+        }
+      }
+    else tran(true);
     }
   else if(strcmp(nextParam,"big")==0){ // run bigBlock with current addr,ID,BlockLen
 		nextParam = strtok_r(NULL," ,",&saveptr1);
@@ -1100,7 +1415,7 @@ if((millis()-timeOut)>RepeatPeriod){
 	Wire.beginTransmission(ID);
   if((ID >= 0x50)&&(ID <= 0x57)) Wire.write(highByte(addr));
 	Wire.write(lowByte(addr));
-	if((err=Wire.endTransmission())!=0)	{
+	if((err=Wire.endTransmission(false))!=7)	{
 		Serial.printf(" EndTransmission=%d",err);
     if(err!=2) {
       Serial.printf(", resetting\n");
@@ -1599,6 +1914,12 @@ Serial.println("  ints    : (intr) Display Interrupt Capture Buffer from esp32-h
 Serial.println("  speed   : Set i2c bus speed in Hz, default=100000");
 Serial.println("  cmd     : display current I2C Command[] buffer"); 
 Serial.println("  pins    : DigitalRead of SCL and SDA");
+Serial.println("  toggle ack stop \"string\" : manual Stimulate SCL,SDA via Diodes from 19,23\n"
+  "     \"string\" : will be send out as binary data, so, chr1 is High Addr chr2 is lowByte\n"
+  "         to facilitate address bytes standard \\xnn escapes are processed");
+
+Serial.println("  clr 0xnn : clear Interrupts int_clr.val=nn");
+Serial.println("  fifo    : empty rx_fifo (status_reg.rx_fifo_cnt !=0, fifo_data.data)");
 Serial.println("  block   : set BlockLen(dec)\n"
   "  id      : set I2C device address(hex)\n"
   "  repeat  : set repeat(dec) 1..49(sec) 50>(milliseconds)\n"
@@ -1611,7 +1932,7 @@ uint32_t tick=millis();
 Serial.printf("millis()=%ld, timeout=%ld delta=%ld\n",tick,timeOut,tick-timeOut);
 Serial.printf("Free Heap=%d\n",system_get_free_heap_size());
 dispVars();
-//currentCommand=NO_COMMAND;
+Serial.printf("sendStop=%s expectAct=%s\n",(sendStop)?"YES":"NO",(ackBit)?"YES":"NO");
 }
 
 void testExplosion(){
@@ -1629,7 +1950,8 @@ Serial.print(" debug enabled \n");
 Serial.setDebugOutput(true);
 Wire.begin();
 setI2cDev(0);
-strcpy(keybuf,"stat +ctr +status_reg\nstat");
+//dev->ctr.ms_mode = 1; // set as Master
+//strcpy(keybuf,"stat init +* -int_clr -scl_low_period -timeout -sda_hold -sda_sample -scl_high_period -scl_start_hold -scl_rstart_setup -scl_stop_hold -scl_stop_setup\nstat");
 processCommand();
 }
 
@@ -1695,4 +2017,5 @@ x 11/02/17 add :raw:d:r:m05fca to all Variables
 
 
 */
+
 
