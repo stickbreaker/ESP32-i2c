@@ -17,9 +17,6 @@ for 3.3V bus
 #include "driver/periph_ctrl.h"
 
 
-#define DR_REG_I2C_EXT_BASE_FIXED               0x60013000
-#define DR_REG_I2C1_EXT_BASE_FIXED              0x60027000
-
 i2c_dev_t * dev=NULL;
 volatile uint32_t* port=NULL;
 /*forwards */
@@ -838,30 +835,94 @@ while((a<len)&&((millis()-timeout)<5000)){
 compLen = a;
 }
 
-void bigBlock(bool display){
+
+void bigBlock(bool display,bool alternate){
 uint32_t start=0;
-Serial.printf("starting at: %ld ",start=millis());
-Wire.beginTransmission(ID);
-if((ID>=0x50)&&(ID<=0x50)) Wire.write(highByte(addr));
-Wire.write(lowByte(addr));
-uint16_t err=Wire.endTransmission();
-if(err){
-	Serial.printf("device(0x%02x) setting address failed =%d",ID,err);
-	nextCommand=NO_COMMAND;
-	return;
-	}
-uint8_t* bigBlock=(uint8_t*)calloc(BlockLen,sizeof(uint8_t));
-uint16_t cnt=Wire.polledRequestFrom(ID,bigBlock,BlockLen,true);
-Serial.printf(" completed at: %ld, %ld cnt=%d\n",millis(),millis()-start,cnt);
-if(cnt!=BlockLen){
-	Serial.printf("ERROR newRequestFrom \n");
-	nextCommand=COMMAND_STOP;
-	}
-if(display||(cnt==0)) dispBuff(bigBlock,BlockLen,addr);
-if(!compBuffer(bigBlock,BlockLen,addr)){
-	nextCommand=COMMAND_STOP;
-	}	
-free(bigBlock);
+uint16_t sections = 5,sectionSize,cnt;
+{ // use ISR, transact
+  uint8_t* bigBuff=(uint8_t*)calloc(BlockLen,sizeof(uint8_t));
+  Serial.printf("starting Tran() at: %ld ",start=millis());
+  sectionSize = BlockLen /5;
+  if(sectionSize < 1) sectionSize = BlockLen;
+  sections = BlockLen;
+  uint16_t tAddr = (addr + BlockLen)-sectionSize;
+  while(sections > 0){
+    Wire.beginTransmission(ID);
+    if((ID>=0x50)&&(ID<=0x50)) Wire.write(highByte(tAddr));
+    Wire.write(lowByte(tAddr));
+    cnt = Wire.endTransmission(false); // queue it
+    if(cnt != 7 ){
+      Serial.printf("\n End Tran(false) =%d tAddr:0x%04x,LastEror=%d ",cnt,tAddr,Wire.lastError());
+      }
+    tAddr = tAddr - sectionSize;
+    sections = sections - sectionSize;
+    if(sections == 0) { // last one
+      cnt = Wire.requestFrom(ID,&bigBuff[sections],sectionSize,true);
+      if(Wire.lastError()!=0){
+        Serial.printf(" requestFrom(True) =%d tAddr:0x%04x, @(%p) blk=%d lastError=%d\n",cnt,tAddr,&bigBuff[sections],sectionSize,Wire.lastError());
+        }
+       }
+    else{
+      cnt = Wire.requestFrom(ID,&bigBuff[sections],sectionSize,false);
+      if(Wire.lastError() !=7){
+        Serial.printf(" requestFrom(False) =%d tAddr:0x%04x, @(%p) blk=%d lastError=%d\n",cnt,tAddr,&bigBuff[sections],sectionSize,Wire.lastError());
+        }
+      }
+    if((sections > 0)&&(sections < sectionSize)){ // odd remainder
+      Wire.beginTransmission(ID);
+      tAddr = addr; // last one, at the beginning.
+      if((ID>=0x50)&&(ID<=0x50)) Wire.write(highByte(tAddr));
+      Wire.write(lowByte(tAddr));
+      cnt = Wire.endTransmission(false); // queue it
+      if(cnt != 7) {
+        Serial.printf(" End Tran(false) =%d tAddr:0x%04x, LastEror=%d ",cnt,tAddr,Wire.lastError());
+        }
+      cnt = Wire.requestFrom(ID,&bigBuff[0],sections,true);
+      if(Wire.lastError() != 0){
+        Serial.printf(" requestFrom(True) =%d tAddr:0x%04x, @(%p) blk=%d lastError=%d\n",cnt,tAddr,&bigBuff[0],sections,Wire.lastError());
+        }
+      sections = 0 ; // termination
+      }
+    }
+      
+ // uint16_t cnt=Wire.transact(bigBuff,BlockLen);
+  Serial.printf(" completed at: %ld, %ld cnt=%d\n",millis(),millis()-start,cnt);
+  if(cnt!=BlockLen){
+    Serial.printf("ERROR =%d \n",Wire.lastError());
+    nextCommand=COMMAND_STOP;
+    }
+  if(display||(cnt==0)) dispBuff(bigBuff,BlockLen,addr);
+  if(!compBuffer(bigBuff,BlockLen,addr)){
+    nextCommand=COMMAND_STOP;
+    }	
+  free(bigBuff);
+  }
+ /* Polling method Retired 21NOV2017
+else { // use polling method
+  Serial.printf("starting poll() at: %ld ",start=millis());
+  Wire.beginTransmission(ID);
+  if((ID>=0x50)&&(ID<=0x50)) Wire.write(highByte(addr));
+  Wire.write(lowByte(addr));
+  uint16_t err=Wire.endTransmission();
+  if(err){
+    Serial.printf("device(0x%02x) setting address failed =%d",ID,err);
+    nextCommand=NO_COMMAND;
+    return;
+    }
+  uint8_t* bigBuff=(uint8_t*)calloc(BlockLen,sizeof(uint8_t));
+  uint16_t cnt=Wire.polledRequestFrom(ID,bigBuff,BlockLen,true);
+  Serial.printf(" completed at: %ld, %ld cnt=%d\n",millis(),millis()-start,cnt);
+  if(cnt!=BlockLen){
+    Serial.printf("ERROR polledRequestFrom =%d \n",Wire.lastError());
+    nextCommand=COMMAND_STOP;
+    }
+  if(display||(cnt==0)) dispBuff(bigBuff,BlockLen,addr);
+  if(!compBuffer(bigBuff,BlockLen,addr)){
+    nextCommand=COMMAND_STOP;
+    }	
+  free(bigBuff);
+  }
+*/
 }
 
 void setSpeed(uint32_t speed){
@@ -1251,7 +1312,7 @@ while(line){ // have next command line, parse it
 			if(strcmp(nextParam,"?")==0) displayBigHelp();
 			else unknownCmdParam("big",nextParam);
 			}
-		else bigBlock(true); // disp buff on Serial
+		else bigBlock(true,false); // disp buff on Serial
 		}
 	else if(strcmp(nextParam,"explode")==0){ // run bigBlock continuous while inc size, dec addr
 		nextParam = strtok_r(NULL," ,",&saveptr1);
@@ -1294,7 +1355,7 @@ while(line){ // have next command line, parse it
 	else if(strcmp(nextParam,"off")==0){ // shutdown repetive commands 
 		nextParam = proc_off(&saveptr1);
 		}
-	else if(strcmp(nextParam,"nr")==0){ // polled block read "nr id(hex)=0x50 len(dec)=10 repeat(dec seconds)=5"
+	else if(strcmp(nextParam,"nr")==0){ // block read "nr id(hex)=0x50 len(dec)=10 repeat(dec seconds)=5"
 		nextParam = proc_newRead(&saveptr1);
 		}
 	else if(strcmp(nextParam,"scan")==0){ // run I2C device NAK scan
@@ -1390,11 +1451,17 @@ while(line){ // have next command line, parse it
 	}
 keyLen=0;
 }
-
+char saveCommandLine[BUFLEN+1];
 void processSerial(){
 char ch=Serial.read();
 if(ch=='\n'){
 	keybuf[keyLen]='\0';
+  if((strcmp(keybuf,".")==0)||(strlen(keybuf)==0)) { // repeat prior cmdline
+    strcpy(keybuf,saveCommandLine);
+    }
+  else {
+    strcpy(saveCommandLine,keybuf);
+    }
 	processCommand();
 	}
 else {
@@ -1904,19 +1971,24 @@ Serial.println("  ?,help  : Help, this Screen");
 Serial.println("  off     : Shutdown continuous display");
 Serial.println("  scan    : Run I2C Device Scan");
 Serial.println("  size    : Run I2C eeprom size Probe 0x50:0x57, 16bit addressing");
-Serial.println("  nr      : (polled) newRequestFrom() with Internal Wire Buffers");
+Serial.println("  nr      : newRequestFrom() with Internal Wire Buffers");
 Serial.println("  stat    : control of background process to display I2C register values, help 'stat ?'");
-Serial.println("  big     : (polled) newRequestFrom() using provided buffer, disp content");
-Serial.println("  explode : (polled) execute 'big' continuously while BlockLen++ and addr--, minimal display");
-Serial.println("  dev     : (intr) Request Manufactures Device ID for all Devices on I2C bus");
-Serial.println("  tran    : (intr) issue beginTransmision(id),write(addr),transact(BlockLen)");
-Serial.println("  ints    : (intr) Display Interrupt Capture Buffer from esp32-hal-i2c.c");
+Serial.println("  big     : newRequestFrom() using provided buffer, disp content");
+Serial.println("  explode : execute 'big' continuously while BlockLen++ and addr--, minimal display");
+Serial.println("  dev     :  Request Manufactures Device ID for all Devices on I2C bus");
+Serial.println("  tran cnt : issue beginTransmision(id),write(addr),transact(BlockLen)\n"
+  "       cnt  : number of continous calls to execute");
+Serial.println("  ints    :  Display Interrupt Capture Buffer from esp32-hal-i2c.c");
 Serial.println("  speed   : Set i2c bus speed in Hz, default=100000");
 Serial.println("  cmd     : display current I2C Command[] buffer"); 
 Serial.println("  pins    : DigitalRead of SCL and SDA");
-Serial.println("  toggle ack stop \"string\" : manual Stimulate SCL,SDA via Diodes from 19,23\n"
+Serial.println("  toggle ack stop \"string\" : manually Stimulate SCL,SDA via Diodes from 19,23\n"
+  "        ack   : check returned ACK value\n"
+  "        stop  : send a STOP signal, if not send, a TIMEOUT IRQ, BUS_BUSY cascade will occur.\n"
+  "              : id is used as I2C device address\n"
   "     \"string\" : will be send out as binary data, so, chr1 is High Addr chr2 is lowByte\n"
-  "         to facilitate address bytes standard \\xnn escapes are processed");
+  "              : to facilitate address bytes, standard \\xnn escapes are accepted.\n"
+  "              : be careful, nulls \\x00 will terminate the string");
 
 Serial.println("  clr 0xnn : clear Interrupts int_clr.val=nn");
 Serial.println("  fifo    : empty rx_fifo (status_reg.rx_fifo_cnt !=0, fifo_data.data)");
@@ -1941,18 +2013,27 @@ timeOut = millis();
 BlockLen++;
 addr--;
 if(!BlockLen) BlockLen=1; // can't have zero length block!
-bigBlock(false); // don't display buf
+bigBlock(false,true); // don't display buf, alternate poll and ISR
 }
 
 void setup(){
 Serial.begin(115200);
 Serial.print(" debug enabled \n");
 Serial.setDebugOutput(true);
+saveCommandLine[0] ='\0';
 Wire.begin();
 setI2cDev(0);
 //dev->ctr.ms_mode = 1; // set as Master
 //strcpy(keybuf,"stat init +* -int_clr -scl_low_period -timeout -sda_hold -sda_sample -scl_high_period -scl_start_hold -scl_rstart_setup -scl_stop_hold -scl_stop_setup\nstat");
-processCommand();
+//processCommand();
+
+/* test Errormessage Text
+uint8_t i=0;
+char * msg;
+while(msg=Wire.getErrorText(i)){
+  Serial.printf(" Error[%d] : %s\n",i++,msg);
+  }
+*/
 }
 
 void loop(){
@@ -2014,7 +2095,19 @@ else{
 /*
 x 11/02/17 add :raw:d:r:m05fca to all Variables
 
-
+ToDo: 21Nov2017
+x Test Fifo overwrite condition, if I fill the TxFifo with three Transactions,
+    First a Write, second a read, Third a write,
+    Does the inbound data of the Read overwrite the Data waiting for the Third transaction?
+    23NOV17 there is a 32byte INPUT and 32byte OUTPUT fifo, they are independant.
+    
+  Test if SlaveMode with address set to 0 (general call) will inject bytes into the rxFifo,
+    I noticed the status_reg.rx_fifo_cnt increates when I was stimulating the I/O bus manually,
+    (toggle).  I tried reading the Fifo_data.val, the values changed, but did not match the bus data?
+  Async support
+  Driver Model
+  Slave Mode
+  
 
 */
 
